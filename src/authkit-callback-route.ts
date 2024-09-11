@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { workos } from './workos.js';
-import { WORKOS_CLIENT_ID, WORKOS_COOKIE_NAME } from './env-variables.js';
-import { encryptSession } from './session.js';
+import { WORKOS_CLIENT_ID, WORKOS_COOKIE_NAME, WORKOS_COOKIE_PASSWORD } from './env-variables.js';
 import { cookieOptions } from './cookie.js';
 import { HandleAuthOptions } from './interfaces.js';
 
@@ -17,9 +16,14 @@ export function handleAuth(options: HandleAuthOptions = {}) {
     if (code) {
       try {
         // Use the code returned to us by AuthKit and authenticate the user with WorkOS
-        const { accessToken, refreshToken, user, impersonator } = await workos.userManagement.authenticateWithCode({
+        // The refreshToken should never be accesible publicly, hence why we encrypt it in the cookie session
+        const { accessToken, refreshToken, sealedSession } = await workos.userManagement.authenticateWithCode({
           clientId: WORKOS_CLIENT_ID,
           code,
+          session: {
+            sealSession: true,
+            cookiePassword: WORKOS_COOKIE_PASSWORD,
+          },
         });
 
         const url = request.nextUrl.clone();
@@ -45,14 +49,12 @@ export function handleAuth(options: HandleAuthOptions = {}) {
 
         const response = NextResponse.redirect(url);
 
-        if (!accessToken || !refreshToken) throw new Error('response is missing tokens');
+        if (!accessToken || !refreshToken) {
+          throw new Error('response is missing tokens');
+        }
 
-        // The refreshToken should never be accesible publicly, hence why we encrypt it in the cookie session
-        // Alternatively you could persist the refresh token in a backend database
-        const session = await encryptSession({ accessToken, refreshToken, user, impersonator });
         const cookieName = WORKOS_COOKIE_NAME || 'wos-session';
-
-        cookies().set(cookieName, session, cookieOptions);
+        cookies().set(cookieName, sealedSession as string, cookieOptions);
 
         return response;
       } catch (error) {

@@ -27,7 +27,8 @@ async function updateSession(
   middlewareAuth: AuthkitMiddlewareAuth,
   redirectUri: string,
 ) {
-  const session = await getSessionFromCookie();
+  // const session = await getSessionFromCookie();
+
   const newRequestHeaders = new Headers(request.headers);
 
   // We store the current request url in a custom header, so we can always have access to it
@@ -68,24 +69,31 @@ async function updateSession(
     return pathRegex.exec(request.nextUrl.pathname);
   });
 
+  const cookieName = WORKOS_COOKIE_NAME || 'wos-session';
+  const cookie = cookies().get(cookieName);
+
+  const session = workos.userManagement.loadSealedSession({
+    sessionData: cookie?.value ?? '',
+    cookiePassword: WORKOS_COOKIE_PASSWORD,
+  });
+
+  const { authenticated, reason } = await session.authenticate();
+
   // If the user is logged out and this path isn't on the allowlist for logged out paths, redirect to AuthKit.
-  if (middlewareAuth.enabled && matchedPaths.length === 0 && !session) {
-    if (debug) console.log('Unauthenticated user on protected route, redirecting to AuthKit');
+  if (middlewareAuth.enabled && matchedPaths.length === 0 && !authenticated) {
+    if (debug) console.log(`Unauthenticated user on protected route, redirecting to AuthKit: ${reason}`);
 
     return NextResponse.redirect(await getAuthorizationUrl({ returnPathname: getReturnPathname(request.url) }));
   }
 
-  // If no session, just continue
-  if (!session) {
+  // If not authenticated, just continue
+  if (!authenticated && reason === 'no_session_cookie_provided') {
     return NextResponse.next({
       request: { headers: newRequestHeaders },
     });
   }
 
-  const hasValidSession = await verifyAccessToken(session.accessToken);
-  const cookieName = WORKOS_COOKIE_NAME || 'wos-session';
-
-  if (hasValidSession) {
+  if (authenticated) {
     if (debug) console.log('Session is valid');
     // set the x-workos-session header according to the current cookie value
     newRequestHeaders.set(sessionHeaderName, cookies().get(cookieName)!.value);
@@ -94,44 +102,30 @@ async function updateSession(
     });
   }
 
-  try {
-    if (debug) console.log('Session invalid. Attempting refresh', session.refreshToken);
+  if (debug) console.log('Session invalid. Attempting refresh');
 
-    const { org_id: organizationId } = decodeJwt<AccessToken>(session.accessToken);
+  // If the session is invalid (i.e. the access token has expired) attempt to re-authenticate with the refresh token
+  const { authenticated: refreshAuthenticated, sealedSession, refreshReason } = await session.refresh();
 
-    // If the session is invalid (i.e. the access token has expired) attempt to re-authenticate with the refresh token
-    const { accessToken, refreshToken, user, impersonator } = await workos.userManagement.authenticateWithRefreshToken({
-      clientId: WORKOS_CLIENT_ID,
-      refreshToken: session.refreshToken,
-      organizationId,
-    });
-
-    if (debug) console.log('Refresh successful:', refreshToken);
-
-    // Encrypt session with new access and refresh tokens
-    const encryptedSession = await encryptSession({
-      accessToken,
-      refreshToken,
-      user,
-      impersonator,
-    });
-
-    newRequestHeaders.set(sessionHeaderName, encryptedSession);
-
-    const response = NextResponse.next({
-      request: { headers: newRequestHeaders },
-    });
-    // update the cookie
-    response.cookies.set(cookieName, encryptedSession, cookieOptions);
-    return response;
-  } catch (e) {
-    if (debug) console.log('Failed to refresh. Deleting cookie and redirecting.', e);
+  if (!refreshAuthenticated) {
+    if (debug) console.log(`Failed to refresh. Deleting cookie and redirecting. ${refreshReason}`);
     const response = NextResponse.next({
       request: { headers: newRequestHeaders },
     });
     response.cookies.delete(cookieName);
     return response;
   }
+
+  if (debug) console.log('Refresh successful');
+
+  newRequestHeaders.set(sessionHeaderName, sealedSession as string);
+
+  const response = NextResponse.next({
+    request: { headers: newRequestHeaders },
+  });
+  // update the cookie
+  response.cookies.set(cookieName, sealedSession as string, cookieOptions);
+  return response;
 }
 
 async function refreshSession(options?: {
@@ -257,11 +251,17 @@ async function verifyAccessToken(accessToken: string) {
 async function getSessionFromCookie() {
   const cookieName = WORKOS_COOKIE_NAME || 'wos-session';
   const cookie = cookies().get(cookieName);
-  if (cookie) {
-    return unsealData<Session>(cookie.value, {
-      password: WORKOS_COOKIE_PASSWORD,
-    });
+
+  if (!cookie) {
+    return;
   }
+
+  const session = workos.userManagement.loadSealedSession({
+    sessionData: cookie.value,
+    cookiePassword: WORKOS_COOKIE_PASSWORD,
+  });
+
+  const { authenticated } = await session.authenticate();
 }
 
 async function getSessionFromHeader(caller: string): Promise<Session | undefined> {
@@ -276,7 +276,12 @@ async function getSessionFromHeader(caller: string): Promise<Session | undefined
   const authHeader = headers().get(sessionHeaderName);
   if (!authHeader) return;
 
-  return unsealData<Session>(authHeader, { password: WORKOS_COOKIE_PASSWORD });
+  const session = workos.userManagement.loadSealedSession({
+    sessionData: authHeader,
+    cookiePassword: WORKOS_COOKIE_PASSWORD,
+  });
+
+  return await session.authenticate();
 }
 
 function getReturnPathname(url: string): string {

@@ -13,6 +13,9 @@ export interface Session {
   refreshToken: string;
   user: User;
   impersonator?: Impersonator;
+  organizationId?: string;
+  role?: string;
+  permissions?: string[];
 }
 
 export interface UserInfo {

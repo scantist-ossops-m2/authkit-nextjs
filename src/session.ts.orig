@@ -20,8 +20,6 @@ async function encryptSession(session: Session) {
 async function updateSession(request: NextRequest, debug: boolean) {
   const session = await getSessionFromCookie();
 
-  newRequestHeaders.delete(sessionHeaderName);
-
   // If no session, just continue
   if (!session) {
     return NextResponse.next();
@@ -71,9 +69,7 @@ async function updateSession(request: NextRequest, debug: boolean) {
     return response;
   } catch (e) {
     console.warn('Failed to refresh', e);
-    const response = NextResponse.next({
-      request: { headers: newRequestHeaders },
-    });
+    const response = NextResponse.next();
     response.cookies.delete(cookieName);
     return response;
   }
